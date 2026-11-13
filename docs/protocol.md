@@ -33,7 +33,7 @@ for each topic, and again each time the value changes.
 
 - `kind`: `midi`, `audio` or `group`.
 - `group`: index of the parent group track, or -1.
-- A clip is `[start, end, name, color]`. Times are in beats. Colors are `0xRRGGBB` as a number.
+- A clip is `[start, end, name, color, muted]`. Times are in beats. Colors are `0xRRGGBB` as a number. `muted` (0 or 1) comes from script 0.6.0; an older script sends 4 values and the hack reads them as not muted.
 - Return tracks are not sent.
 - No loop or punch state here. It is in `position`, which runs every tick.
 
@@ -59,5 +59,20 @@ for each topic, and again each time the value changes.
 | `{"ns":"arrangement","cmd":"punch_out_toggle"}` | Flip `song.punch_out` |
 | `{"ns":"transport","cmd":"set_loop","start":<beats>,"length":<beats>}` | Move or resize the loop |
 
-Each command gets a reply (`{"ok":true}`). The hack ignores it. A failed command gets `"ok":false` and
+### Clip content and editing (script 0.6.0)
+
+These are sent with an `id` (from 100 up). The hack waits for the reply (`callLive` in `source.go`, 5 s
+timeout) and shows an error code as a short message. A clip is named by `track` (index) and `start`
+(beats). The full list with arguments is in `docs/pushhack-remote-script.md` in `ableton-push-hack`.
+
+| Command | Used for |
+|---|---|
+| `{"ns":"arrangement","cmd":"clips_info","clips":[{"track":1,"start":8}]}` | Notes, markers, audio file and warp markers of up to 8 clips on screen |
+| `clip_move`, `clip_duplicate`, `clip_delete`, `clip_split`, `clip_trim`, `clip_set`, `clip_transpose`, `clip_velocity`, `clip_quantize`, `clip_crop`, `clip_new` | Clip edit mode |
+| `{"ns":"arrangement","cmd":"snapshot"}` | The arrangement at once, after an edit |
+| `{"ns":"transport","cmd":"undo"}` / `redo` | Undo button |
+
+The `hello` reply carries `script_version`; the hack logs it and warns in edit mode when it is older than 0.6.0.
+
+Each command without an `id` gets a reply (`{"ok":true}`). The hack ignores it. A failed command gets `"ok":false` and
 a short `error`; the hack logs it and keeps the connection.

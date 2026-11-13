@@ -101,6 +101,23 @@ func syncDPadLEDs(up, down, left, right bool) {
 	setLED(byte(push3.CCDPadRight), v(right))
 }
 
+// syncEditLEDs: Clip lights while clip edit mode is on; Undo is always lit.
+// The buttons edit mode uses (Duplicate, Delete, Mute, Quantize, New and the
+// 8 under the screen) light only in edit mode.
+func syncEditLEDs(on bool) {
+	v := byte(0)
+	if on {
+		v = ledWhite
+	}
+	setLED(byte(push3.CCClipView), v)
+	setLED(byte(push3.CCUndo), ledWhite)
+	for _, cc := range []uint8{push3.CCDuplicate, push3.CCDelete, push3.CCMute, push3.CCQuantize, push3.CCNew,
+		push3.CCScreenBot1, push3.CCScreenBot2, push3.CCScreenBot3, push3.CCScreenBot4,
+		push3.CCScreenBot5, push3.CCScreenBot6, push3.CCScreenBot7, push3.CCScreenBot8} {
+		setLED(byte(cc), v)
+	}
+}
+
 // Palette indices chosen on the device.
 const (
 	ledPlayGreen = 126 // Play while playing

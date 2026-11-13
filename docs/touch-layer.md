@@ -58,6 +58,7 @@ Source: `docs/push3-button-map.md` in the ableton-push-hack repo.
 | Volume knob | not yet: could show the view's start/end (bars) | -- |
 | Tempo knob | not yet: could show the zoom mode and level | -- |
 | Knobs 3 to 8 | not yet -- no job assigned | -- |
+| Encoders 1 to 7, clip edit mode | The selected clip: Position, Track, Start, End, Transpose, Velocity (MIDI) or Gain (audio), Color. The header shows all seven; turning one shows its value in the bar | `POSITION 5.1.1`, `TRANSPOSE +2 st` |
 
 Positions and lengths are formatted bars.beats.16th (`bbs.go`: `bbsPosition`,
 `bbsLength`), matching Live's own display.

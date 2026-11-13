@@ -14,7 +14,7 @@ two topics:
 - `arrangement`: a snapshot of the open set (tracks, clips, locators, time signature, tempo). The script builds it about once a second at most and sends it only when it changed. On a big set it waits longer between builds.
 - `position`: the playhead, transport and loop/punch state. It is sent every tick it changes, so a loop toggle or a knob turn shows up almost at once.
 
-Commands go the other way: `set_time`, `set_loop` and `play_toggle` in the `transport` namespace, and `bta`, `loop_toggle`, `punch_in_toggle` and `punch_out_toggle` in `arrangement`. `source.go` turns them from the shape the rest of the hack uses.
+Commands go the other way: `set_time`, `set_loop` and `play_toggle` in the `transport` namespace, and `bta`, `loop_toggle`, `punch_in_toggle` and `punch_out_toggle` in `arrangement`. `source.go` turns them from the shape the rest of the hack uses. Commands that need an answer (clip content, clip edits, undo) go through `callLive`, which matches the reply by `id`.
 
 This hack uses the script on the Push 3 (Linux). Another client can also use it on the computer where Live runs.
 
@@ -35,6 +35,10 @@ This hack uses the script on the Push 3 (Linux). Another client can also use it 
 | `render.go` | Draws the 960x160 image: ruler, lanes, clips, names, locators, loop (region bar + on/off boundary lines), play-start anchor (triangle), scrub cursor, playhead |
 | `source.go` | Connection to the Remote Script, the current set, commands to Live. Also holds local-only state Live never reports back: the play-start anchor, the selected locator, and the scrub cursor. The playhead and the loop start/length each briefly ignore Live's report after a local edit (`hold`, `loopHold`) -- kept as two SEPARATE timers on purpose, so adjusting the loop can never freeze the playhead or vice versa |
 | `model.go` | Data types (Set, Track, Clip, Locator, Loop) |
+| `content.go` | Clip content cache: asks PushHack (`clips_info`) for the notes and audio info of the clips on screen, 8 per call, one call at a time, again every 4 s while drawn. Also maps a clip's beats to clip time (loops) and file seconds (warp markers) |
+| `audiofile.go` | Waveform overview (min/max per 256 frames) read from WAV/AIFF files, one file at a time in the background, at most 48 files kept |
+| `render_content.go` | Draws notes and waveforms inside clips, and the edit mode's outlines |
+| `edit.go` | Clip edit mode: track and clip selection, encoder edits (shown first, sent on release or after a rest), the clip actions, Undo. Jobs run one at a time; each waits for the fresh arrangement |
 | `leds.go` | LED blackout and the few LEDs we light (Play, Session, Page </>, the 3 loop/punch buttons, the 4 D-pad directions) |
 | `depcheck.go` | Logs when push-manager or push-display is missing |
 | `als.go`, `colors.go` | Reader for a saved `.als` file. Only for `make preview` and `-set`. Not used on the Push |

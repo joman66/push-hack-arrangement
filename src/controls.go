@@ -20,6 +20,8 @@ package main
 //   Encoder 1        loop start, in bars (Shift = a precise 1/16 beat step)
 //   Encoder 2        loop length, in bars (Shift = a precise 1/16 beat step)
 //   D-pad            scroll; hold to repeat
+//   Clip             clip edit mode on/off (edit.go has its controls)
+//   Undo             Live's undo (Shift: redo)
 
 import (
 	"math"
@@ -42,6 +44,12 @@ const (
 	ccTopPunchO = push3.CCScreenTop3 // top button 3: Punch Out
 	ccEncoder1  = push3.CCEncoder1   // loop start
 	ccEncoder2  = push3.CCEncoder2   // loop length
+	ccClip      = push3.CCClipView   // clip edit mode on/off
+	ccUndo      = push3.CCUndo       // undo (Shift: redo)
+	ccDuplicate = push3.CCDuplicate  // edit mode: duplicate clip
+	ccMute      = push3.CCMute       // edit mode: mute clip
+	ccQuantize  = push3.CCQuantize   // edit mode: quantize clip
+	ccNew       = push3.CCNew        // edit mode: new MIDI clip
 
 	jogTargetPx = 10 // wanted screen distance of one jog tick, before the speed ramp
 
@@ -124,6 +132,9 @@ type controls struct {
 	hold    map[uint8]chan struct{} // D-pad buttons being held
 	zoomV   bool                    // Tempo knob zooms tracks (true) or time (false)
 
+	edit        *editCtl // clip edit mode; nil = none
+	deleteArmed bool     // edit mode: Delete pressed, not used with Tempo press yet
+
 	// Loop encoders add friction (core has no ready-made helper for this --
 	// checked -- so it's the same tick-accumulator idea the reference
 	// Push3ArrangementMode.py script uses for its own encoders): raw ticks pile
@@ -138,9 +149,84 @@ func newControls(vc *viewCtl, st *store, isOn, shiftHeld, deleteHeld func() bool
 		changed: changed, send: send, feedback: feedback, hold: map[uint8]chan struct{}{}}
 }
 
+// editOn: clip edit mode is on.
+func (c *controls) editOn() bool { return c.edit.isOn() }
+
+// softAction: the action of each button under the screen in edit mode.
+var softAction = map[uint8]string{
+	push3.CCScreenBot1: "split", push3.CCScreenBot2: "duplicate", push3.CCScreenBot3: "delete",
+	push3.CCScreenBot4: "mute", push3.CCScreenBot5: "quantize", push3.CCScreenBot6: "crop",
+	push3.CCScreenBot7: "copy", push3.CCScreenBot8: "paste",
+}
+
+// editCC handles what clip edit mode takes over. true = handled.
+func (c *controls) editCC(cc, val uint8) bool {
+	if c.edit == nil {
+		return false
+	}
+	switch {
+	case cc == ccClip:
+		if val > 0 {
+			c.edit.toggle()
+		}
+		return true
+	case cc == ccUndo:
+		if val > 0 {
+			if c.shiftHeld() {
+				c.edit.action("redo")
+			} else {
+				c.edit.action("undo")
+			}
+		}
+		return true
+	case !c.editOn():
+		return false
+	case cc >= push3.CCEncoder1 && cc <= push3.CCEncoder8:
+		c.edit.turn(int(cc-push3.CCEncoder1), push3.DecodeRel(val))
+		return true
+	case softAction[cc] != "":
+		if val > 0 {
+			c.edit.action(softAction[cc])
+		}
+		return true
+	}
+	if val == 0 && cc != ccDelete {
+		switch cc {
+		case ccDuplicate, ccMute, ccQuantize, ccNew:
+			return true
+		}
+		return false
+	}
+	switch cc {
+	case ccDuplicate:
+		c.edit.action("duplicate")
+	case ccMute:
+		c.edit.action("mute")
+	case ccQuantize:
+		c.edit.action("quantize")
+	case ccNew:
+		c.edit.action("new")
+	case ccDelete:
+		// on release, unless it was held for Delete + Tempo press (zoom reset)
+		c.mu.Lock()
+		fire := val == 0 && c.deleteArmed
+		c.deleteArmed = val > 0
+		c.mu.Unlock()
+		if fire {
+			c.edit.action("delete")
+		}
+	default:
+		return false
+	}
+	return true
+}
+
 // onCC handles one control-surface CC.
 func (c *controls) onCC(cc, val uint8) {
 	if !c.isOn() {
+		return
+	}
+	if c.editCC(cc, val) {
 		return
 	}
 	switch cc {
@@ -165,6 +251,9 @@ func (c *controls) onCC(cc, val uint8) {
 		c.changed()
 	case ccTempoPress:
 		if val > 0 {
+			c.mu.Lock()
+			c.deleteArmed = false // Delete was a modifier this time, not "delete clip"
+			c.mu.Unlock()
 			if c.deleteHeld() {
 				c.resetZoom()
 			} else {
@@ -471,6 +560,20 @@ func (c *controls) dpad(cc, val uint8) {
 }
 
 func (c *controls) dpadAction(cc uint8) {
+	if c.editOn() && !c.shiftHeld() {
+		switch cc {
+		case ccDPadUp:
+			c.edit.moveTrack(-1)
+		case ccDPadDown:
+			c.edit.moveTrack(+1)
+		case ccDPadLeft:
+			c.edit.moveClip(-1)
+		case ccDPadRight:
+			c.edit.moveClip(+1)
+		}
+		c.changed()
+		return
+	}
 	switch cc {
 	case ccDPadUp:
 		c.vc.scrollTracks(-1)

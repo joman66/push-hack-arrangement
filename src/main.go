@@ -75,8 +75,21 @@ func main() {
 
 	st := &store{}
 	vc := newViewCtl(func() *Set { s, _, _ := st.get(); return s })
-	vc.onScrollAvailability(syncDPadLEDs)
 	var mode *modeCtl // set below; touch's callback closes over it
+	redraw := func() {
+		if mode != nil {
+			mode.refresh()
+		}
+	}
+	content := newContentCache(callLive, redraw)
+	chord := newChordDetector()
+	edit := newEditCtl(st, vc, content, redraw, func() bool { return chord.isHeld(ccShift) })
+	vc.onScrollAvailability(func(up, down, left, right bool) {
+		if edit.isOn() { // D-pad selects tracks and clips: always lit
+			up, down, left, right = true, true, true, true
+		}
+		syncDPadLEDs(up, down, left, right)
+	})
 
 	var ctl *controls // set below; touch's callback reads it at render time
 
@@ -96,7 +109,7 @@ func main() {
 		if ctl != nil && ctl.zoomTracks() {
 			zoom = fmt.Sprintf("Zoom Tracks: %d tracks", tracks)
 		}
-		return touchInfo{
+		info := touchInfo{
 			cols: []widgets.HeaderCol{
 				{Col: 0, Label: "Loop", Toggle: true, On: loopOn, Name: "Loop Start", Value: bbsPosition(loopStart, bpb)},
 				{Col: 1, Label: "Punch In", Toggle: true, On: punchIn, Name: "Loop Length", Value: bbsLength(loopLength, bpb)},
@@ -110,6 +123,23 @@ func main() {
 				noteVolumeTouch:   fmt.Sprintf("View: bar %d-%d", first, last),
 			},
 		}
+		if cols, text := edit.touchText(s); cols != nil {
+			// clip edit mode: the knobs edit the selected clip; the top
+			// buttons keep Loop / Punch In / Punch Out
+			for i := range cols {
+				if cols[i].Col < 3 {
+					cols[i].Label, cols[i].Toggle = info.cols[cols[i].Col].Label, true
+					cols[i].On = info.cols[cols[i].Col].On
+				}
+			}
+			info.cols = cols
+			delete(info.text, noteEncoder1Touch)
+			delete(info.text, noteEncoder2Touch)
+			for n, v := range text {
+				info.text[n] = v
+			}
+		}
+		return info
 	}, func() { mode.refresh() })
 
 	frame := func() image.Image {
@@ -118,6 +148,8 @@ func main() {
 			return renderMessage(msg, hint)
 		}
 		vp := vc.viewport(s)
+		vp.content = content
+		edit.decorate(s, &vp)
 		tv := touch.view()
 		vp.overlay = tv.cols
 		if len(tv.bar) > 0 {
@@ -136,10 +168,16 @@ func main() {
 		syncStateLEDs(playing, bta)
 		syncTransportLEDs(loopOn, punchIn, punchOut)
 		syncNavLEDs()
+		syncEditLEDs(edit.isOn())
 		if s, _, _ := st.get(); s != nil {
-			syncDPadLEDs(vc.availability(s))
+			up, down, left, right := vc.availability(s)
+			if edit.isOn() {
+				up, down, left, right = true, true, true, true
+			}
+			syncDPadLEDs(up, down, left, right)
 		}
 	}
+	edit.onToggle = func(bool) { syncLEDs() }
 
 	stop := make(chan struct{})
 	if *setPath != "" {
@@ -157,7 +195,9 @@ func main() {
 		go runLiveSource(st, func() {
 			if mode.isOn() {
 				t, playing := st.pos()
-				vc.follow(t, playing)
+				if !edit.isOn() { // editing: the view stays where you put it
+					vc.follow(t, playing)
+				}
 				_, bta := st.state()
 				loopOn, punchIn, punchOut, _, _ := st.transport()
 				if playing != last.playing || bta != last.bta || loopOn != last.loopOn ||
@@ -171,7 +211,6 @@ func main() {
 			mode.refresh()
 		}, stop)
 	}
-	chord := newChordDetector()
 	ctl = newControls(vc, st, mode.isOn,
 		func() bool { return chord.isHeld(ccShift) },
 		func() bool { return chord.isHeld(ccDelete) },
@@ -191,14 +230,23 @@ func main() {
 			}
 			burstLEDs(syncLEDs)
 		})
+	ctl.edit = edit
 	h := &midiHandler{chord: chord, onCC: func(cc, val uint8) {
 		if mode.isOn() {
 			touch.onButton(cc, val)
 		}
 		touch.onTurn(cc)
 		ctl.onCC(cc, val)
-	}, onNote: touch.onNote,
+	}, onNote: func(note uint8, on bool) {
+		touch.onNote(note, on)
+		if !on && isEncoderNote(note) && edit.isOn() {
+			edit.released(int(note)) // knob let go: send the clip edit now
+		}
+	},
 		onFire: func() {
+			if mode.isOn() {
+				edit.off() // first: its LEDs must go before the Push is handed back
+			}
 			mode.toggle()
 			if mode.isOn() {
 				syncLEDs()

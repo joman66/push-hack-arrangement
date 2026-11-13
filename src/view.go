@@ -9,6 +9,7 @@ package main
 import (
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/federico-pepe/ableton-push-hack/core/push3"
@@ -72,7 +73,11 @@ func totalBeats(s *Set) float64 {
 
 func fitPPB(s *Set) float64 { return float64(screenW) / totalBeats(s) }
 
-func laneAvail() float64 { return float64(screenH - rulerH - 1) }
+func laneAvail() float64 { return float64(screenH - rulerH - 1 - int(reservedBottom.Load())) }
+
+// reservedBottom: pixels at the bottom the lanes leave free (the soft-button
+// strip in clip edit mode).
+var reservedBottom atomic.Int32
 
 func fitLane(s *Set) float64 {
 	n := len(s.Tracks)
@@ -294,6 +299,27 @@ func (c *viewCtl) reveal(t float64) {
 		c.x0 = t - span/2
 		c.clamp(s)
 	}
+}
+
+// revealTrack scrolls the tracks so track i is fully on screen.
+func (c *viewCtl) revealTrack(i int) {
+	s := c.get()
+	if s == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	defer c.notifyAvailability(s)
+	c.clamp(s)
+	visible := laneAvail() / c.laneH
+	f := float64(i)
+	switch {
+	case f < c.first:
+		c.first = f
+	case f+1 > c.first+visible:
+		c.first = f + 1 - visible
+	}
+	c.clamp(s)
 }
 
 // handleCC applies one control-surface CC. Returns true if the view changed.
