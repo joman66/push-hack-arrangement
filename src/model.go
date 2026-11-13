@@ -7,6 +7,7 @@ type Clip struct {
 	Start, End float64 // beats
 	Name       string
 	Color      uint32 // 0xRRGGBB
+	Muted      bool   // clip off (Live greys it out)
 }
 
 type Track struct {
@@ -36,6 +37,7 @@ type Set struct {
 	Playhead    float64 // saved insert marker (beats)
 	Length      float64 // end of last clip (beats)
 	BeatsPerBar float64 // 0 = 4
+	Tempo       float64 // BPM; 0 = unknown (120 is used)
 	Overridden  bool    // Session clips override the arrangement (Back to Arrangement lit): draw dimmed
 	PunchIn     bool
 	PunchOut    bool

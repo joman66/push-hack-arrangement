@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- Clip edit mode (Clip button), in the spirit of the MPC's arrange view. Select a track (D-pad up/down) and a clip (D-pad left/right or the jog wheel). Encoders 1-7 move the clip in time or to another track, move its start or end edge, transpose it, change velocity (MIDI) or gain (audio), and change its colour. A knob edit shows as a white outline first and goes to Live when you let go of the knob. The buttons under the screen split, duplicate, delete, mute, quantize, crop, copy and paste. The Duplicate, Delete, Mute, Quantize and New buttons work too. Undo (Shift: Redo) works in and out of edit mode. Needs PushHack Remote Script 0.6.0.
+- Clips show their content: MIDI notes and audio waveforms, following loops and warp markers. Waveforms are read from WAV and AIFF files on the Push (Push 3 standalone). Muted clips are grey.
+
+### Changed
+- The hack can now wait for a reply from PushHack (`callLive`), and reads the script version from `hello`.
+
 ## [0.0.11-alpha] - 2026-11-12
 
 First public release, installable from the Push Hack catalog.

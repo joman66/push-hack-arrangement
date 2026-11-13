@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -324,5 +325,71 @@ func TestRunLiveSourceHandshakeAndStream(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("command never arrived")
+	}
+}
+
+func TestCallLiveGetsItsReply(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	link.set(a)
+	defer link.set(nil)
+	go func() {
+		rd := bufio.NewReader(b)
+		line, _ := rd.ReadBytes('\n')
+		var req map[string]any
+		_ = json.Unmarshal(line, &req)
+		id := int(req["id"].(float64))
+		if req["ns"] != "arrangement" || req["cmd"] != "clip_delete" || req["track"].(float64) != 2 {
+			b.Write([]byte(`{"id":` + strconv.Itoa(id) + `,"ok":false,"error":"wrong_request"}` + "\n"))
+			return
+		}
+		b.Write([]byte(`{"id":` + strconv.Itoa(id) + `,"ok":true,"data":{"x":1}}` + "\n"))
+	}()
+	st := &store{}
+	stop := make(chan struct{})
+	defer close(stop)
+	go readLive(a, st, func() {}, stop)
+	got := make(chan string, 1)
+	callLive("arrangement", "clip_delete", map[string]any{"track": 2, "start": 4.0}, func(d json.RawMessage, code string) {
+		got <- code + string(d)
+	})
+	select {
+	case g := <-got:
+		if g != `{"x":1}` {
+			t.Fatalf("reply %q", g)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no reply")
+	}
+}
+
+func TestCallLiveWithoutConnection(t *testing.T) {
+	link.set(nil)
+	got := make(chan string, 1)
+	callLive("transport", "undo", nil, func(_ json.RawMessage, code string) { got <- code })
+	if g := <-got; g != "not_connected" {
+		t.Fatalf("%q", g)
+	}
+}
+
+func TestScriptVersionFromHello(t *testing.T) {
+	defer scriptVersion.Store("")
+	decodeLive([]byte(`{"ok":true,"id":1,"data":{"protocol":1,"script_version":"0.6.0"}}`))
+	if !scriptAtLeast(0, 6) || scriptAtLeast(0, 7) || scriptAtLeast(1, 0) {
+		t.Fatal("version compare")
+	}
+}
+
+func TestSnapshotReadsMutedClips(t *testing.T) {
+	m, ok := decodeLive([]byte(`{"t":"event","topic":"arrangement","data":{"tracks":[{"name":"A","kind":"midi","color":1,"group":-1,
+	  "clips":[[0,4,"a",5,1],[4,8,"b",5,0],[8,9,"old",5]]}],"locators":[],"sig":[4,4],"tempo":98}}`))
+	if !ok {
+		t.Fatal("not decoded")
+	}
+	s := setFromSnapshot(&m)
+	c := s.Tracks[0].Clips
+	if !c[0].Muted || c[1].Muted || c[2].Muted || s.Tempo != 98 {
+		t.Fatalf("%+v tempo %v", c, s.Tempo)
 	}
 }

@@ -13,7 +13,10 @@ import (
 	"log"
 	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -214,6 +217,7 @@ type wireClip struct {
 	Start, End float64
 	Name       string
 	Color      uint32
+	Muted      bool
 }
 
 func (c *wireClip) UnmarshalJSON(b []byte) error {
@@ -225,6 +229,11 @@ func (c *wireClip) UnmarshalJSON(b []byte) error {
 	_ = json.Unmarshal(a[1], &c.End)
 	_ = json.Unmarshal(a[2], &c.Name)
 	_ = json.Unmarshal(a[3], &c.Color)
+	if len(a) > 4 { // [.., muted] since script 0.6.0
+		var m int
+		_ = json.Unmarshal(a[4], &m)
+		c.Muted = m != 0
+	}
 	return nil
 }
 
@@ -267,7 +276,7 @@ type wireMsg struct {
 }
 
 func setFromSnapshot(m *wireMsg) *Set {
-	s := &Set{Name: "Live Set", BeatsPerBar: 4}
+	s := &Set{Name: "Live Set", BeatsPerBar: 4, Tempo: m.Tempo}
 	if m.Sig[0] > 0 && m.Sig[1] > 0 {
 		s.BeatsPerBar = float64(m.Sig[0]) * 4 / float64(m.Sig[1])
 	}
@@ -281,7 +290,7 @@ func setFromSnapshot(m *wireMsg) *Set {
 			if col == 0 {
 				col = t.Color
 			}
-			tr.Clips = append(tr.Clips, Clip{Start: c.Start, End: c.End, Name: c.Name, Color: col})
+			tr.Clips = append(tr.Clips, Clip{Start: c.Start, End: c.End, Name: c.Name, Color: col, Muted: c.Muted})
 			if c.End > s.Length {
 				s.Length = c.End
 			}
@@ -314,6 +323,7 @@ func runLiveSource(st *store, onChange func(), stop <-chan struct{}) {
 			st.putMessage("Waiting for Live Set data", "")
 			readLive(conn, st, onChange, stop)
 			link.set(nil)
+			calls.failAll("not_connected")
 			conn.Close()
 			log.Print("Remote Script disconnected")
 			st.putMessage(msgNotConnected, hintActivate)
@@ -387,6 +397,15 @@ func decodeLive(line []byte) (wireMsg, bool) {
 		}
 		d.T = "pos"
 		return d, true
+	case m.OK != nil && m.ID >= firstCallID:
+		calls.deliver(m.ID, m.Data, m.Error, *m.OK)
+	case m.OK != nil && *m.OK && m.ID == 1:
+		var hello struct {
+			Version string `json:"script_version"`
+		}
+		_ = json.Unmarshal(m.Data, &hello)
+		scriptVersion.Store(hello.Version)
+		log.Printf("PushHack script %s", hello.Version)
 	case m.OK != nil && !*m.OK:
 		if m.ID == 1 || m.ID == 2 { // hello or subscribe; a failed command is only logged
 			return wireMsg{T: "refused", Error: m.Error}, true
@@ -450,4 +469,128 @@ func sendCmd(m map[string]any) {
 	}
 	_ = link.conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 	_, _ = link.conn.Write(append(b, '\n'))
+}
+
+// ---- calls: a command that wants its reply -------------------------------
+
+// firstCallID: ids below this are the handshake (1, 2) and fire-and-forget
+// commands (no id). Replies at or above it go to a waiting callback.
+const firstCallID = 100
+
+const callTimeout = 5 * time.Second
+
+// scriptVersion: PushHack's version from the hello reply ("" = not known yet).
+var scriptVersion atomic.Value
+
+// scriptAtLeast: true when the connected PushHack is at least major.minor.
+func scriptAtLeast(major, minor int) bool {
+	v, _ := scriptVersion.Load().(string)
+	p := strings.SplitN(v, ".", 3)
+	if len(p) < 2 {
+		return false
+	}
+	a, _ := strconv.Atoi(p[0])
+	b, _ := strconv.Atoi(p[1])
+	return a > major || (a == major && b >= minor)
+}
+
+type callTable struct {
+	mu   sync.Mutex
+	next int
+	m    map[int]func(json.RawMessage, string)
+}
+
+var calls = callTable{next: firstCallID, m: map[int]func(json.RawMessage, string){}}
+
+func (t *callTable) add(cb func(json.RawMessage, string)) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	id := t.next
+	t.next++
+	t.m[id] = cb
+	return id
+}
+
+func (t *callTable) take(id int) func(json.RawMessage, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cb := t.m[id]
+	delete(t.m, id)
+	return cb
+}
+
+// deliver hands a reply to its callback. errCode is "" on success.
+func (t *callTable) deliver(id int, data json.RawMessage, errCode string, ok bool) {
+	cb := t.take(id)
+	if cb == nil {
+		return
+	}
+	if ok {
+		errCode = ""
+	} else if errCode == "" {
+		errCode = "failed"
+	}
+	go cb(data, errCode)
+}
+
+// failAll: the link dropped; nobody will answer.
+func (t *callTable) failAll(code string) {
+	t.mu.Lock()
+	m := t.m
+	t.m = map[int]func(json.RawMessage, string){}
+	t.mu.Unlock()
+	for _, cb := range m {
+		go cb(nil, code)
+	}
+}
+
+// callLive sends {ns, cmd, args...} and runs cb with the reply data, or an
+// error code ("not_connected", "timeout", or PushHack's own code). cb runs on
+// its own goroutine. Never blocks.
+func callLive(ns, cmd string, args map[string]any, cb func(data json.RawMessage, errCode string)) {
+	if cb == nil {
+		cb = func(json.RawMessage, string) {}
+	}
+	id := calls.add(cb)
+	req := map[string]any{"id": id, "ns": ns, "cmd": cmd}
+	for k, v := range args {
+		req[k] = v
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		calls.deliver(id, nil, "bad_arg", false)
+		return
+	}
+	link.mu.Lock()
+	conn := link.conn
+	if conn != nil {
+		_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+		_, err = conn.Write(append(b, '\n'))
+	}
+	link.mu.Unlock()
+	if conn == nil || err != nil {
+		calls.deliver(id, nil, "not_connected", false)
+		return
+	}
+	time.AfterFunc(callTimeout, func() {
+		if cb := calls.take(id); cb != nil {
+			cb(nil, "timeout")
+		}
+	})
+}
+
+// refreshSnapshot asks for the arrangement at once (after an edit), instead
+// of waiting up to a second for the next "arrangement" event.
+func refreshSnapshot(st *store, onChange func()) {
+	callLive("arrangement", "snapshot", nil, func(data json.RawMessage, errCode string) {
+		if errCode != "" {
+			return
+		}
+		var m wireMsg
+		if json.Unmarshal(data, &m) != nil {
+			return
+		}
+		st.putSet(setFromSnapshot(&m))
+		onChange()
+	})
 }

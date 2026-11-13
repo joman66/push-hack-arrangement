@@ -56,6 +56,11 @@ var (
 	colCursor = namedRGB("lavender")  // scrub cursor (plain jog wheel; does not move Live)
 )
 
+// colSelLane: track-name column of the selected track (clip edit mode).
+var colSelLane = namedRGB("gray_mid")
+
+const softStripH = 16 // soft-button labels at the bottom (clip edit mode)
+
 func rgb(c uint32) color.NRGBA {
 	return color.NRGBA{uint8(c >> 16), uint8(c >> 8), uint8(c), 255}
 }
@@ -69,6 +74,21 @@ type viewport struct {
 	gutter     int                 // width of the track-name column (0 = none)
 	toastLines []string            // message box lines (a toast), nil = none
 	overlay    []widgets.HeaderCol // touch layer header columns, nil = none
+
+	content *contentCache // notes and waveforms; nil = plain clips
+
+	// Clip edit mode (edit.go): the selected track, only when selTrackOn.
+	selTrack   int
+	selTrackOn bool
+	sel        *clipBox               // selected clip, outlined white
+	ghost      *clipBox               // where a pending encoder edit puts it, outlined yellow
+	soft       *[8]widgets.SoftButton // labels for the buttons under the screen
+}
+
+// clipBox: a clip's place on screen terms: track index and time range.
+type clipBox struct {
+	track      int
+	start, end float64
 }
 
 // fitView shows the whole song, every track.
@@ -104,6 +124,12 @@ const dimFactor = 0.35
 
 func dim(c color.NRGBA) color.NRGBA {
 	return color.NRGBA{uint8(float64(c.R) * dimFactor), uint8(float64(c.G) * dimFactor), uint8(float64(c.B) * dimFactor), 255}
+}
+
+// grey: a muted clip, like Live draws one.
+func grey(c color.NRGBA) color.NRGBA {
+	l := uint8(40 + luma(c)*35/100)
+	return color.NRGBA{l, l, l, 255}
 }
 
 func luma(c color.NRGBA) int { return (int(c.R)*299 + int(c.G)*587 + int(c.B)*114) / 1000 }
@@ -144,7 +170,7 @@ func renderArrangement(s *Set, v viewport) *image.NRGBA {
 		if h > 2 {
 			h-- // 1 px gap between lanes
 		}
-		for _, c := range tr.Clips {
+		for ci, c := range tr.Clips {
 			x0, x1 := v.x(c.Start), v.x(c.End)
 			if x1 <= g || x0 >= screenW {
 				continue
@@ -154,12 +180,19 @@ func renderArrangement(s *Set, v viewport) *image.NRGBA {
 				w = 1
 			}
 			col := rgb(c.Color)
+			if c.Muted {
+				col = grey(col)
+			}
 			if s.Overridden {
 				col = dim(col)
 			}
 			fill(img, x0, y0, w, h, g, top, col)
+			named := v.laneH >= namesMinLane && w >= 36 && y0 >= top && y0+h <= screenH
+			if v.content != nil && w >= 3 {
+				drawContent(img, s, v, i, &tr.Clips[ci], x0, x1, y0, h, named, col)
+			}
 			// clip name when there is room
-			if v.laneH >= namesMinLane && w >= 36 && y0 >= top && y0+h <= screenH {
+			if named {
 				tc := colBG
 				if luma(col) < 110 {
 					tc = colPlay
@@ -174,7 +207,11 @@ func renderArrangement(s *Set, v viewport) *image.NRGBA {
 			}
 		}
 		if g > 0 {
-			fill(img, 0, y0, g, h, 0, top, colGutter)
+			gc := colGutter
+			if v.selTrackOn && i == v.selTrack {
+				gc = colSelLane
+			}
+			fill(img, 0, y0, g, h, 0, top, gc)
 			fill(img, 0, y0, 3, h, 0, top, rgb(tr.Color))
 			if y0 >= top && y0+h <= screenH {
 				ind := 0
@@ -183,7 +220,20 @@ func renderArrangement(s *Set, v viewport) *image.NRGBA {
 				}
 				text.Draw(img, 7+ind, y0+10, text.Truncate(tr.Name, (g-10-ind)/7), colText)
 			}
+		} else if v.selTrackOn && i == v.selTrack {
+			fill(img, 0, y0, 2, h, 0, top, colPlay)
 		}
+	}
+
+	// edit mode: the selected clip has a white outline. While an encoder edit
+	// waits to be sent, the clip goes dark where it is now and the outline
+	// shows where it will be.
+	switch {
+	case v.ghost != nil && v.sel != nil:
+		darkenClipBox(img, s, v, *v.sel)
+		drawClipBox(img, s, v, *v.ghost, colPlay)
+	case v.sel != nil:
+		drawClipBox(img, s, v, *v.sel, colPlay)
 	}
 
 	// locators -- the one last jumped to (Page </>) draws white, the rest sky blue
@@ -229,6 +279,9 @@ func renderArrangement(s *Set, v viewport) *image.NRGBA {
 		fill(img, x, 0, 2, screenH, v.gutter, 0, colPlay)
 	}
 
+	if v.soft != nil {
+		widgets.DrawBotStrip(img, widgets.Default, screenH-softStripH, screenW, screenW/8, softStripH, *v.soft, "")
+	}
 	if len(v.overlay) > 0 {
 		widgets.DrawTouchHeader(img, widgets.Default, v.overlay)
 	}

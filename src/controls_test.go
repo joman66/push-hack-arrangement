@@ -486,3 +486,107 @@ func TestDpadRepeatsWhileHeldAndStopsOnRelease(t *testing.T) {
 		t.Fatal("repeat continued after release")
 	}
 }
+
+// editRigOn: controls with clip edit mode wired, PushHack faked.
+func editControls(t *testing.T) (*rig, *recorder) {
+	r := newRig()
+	rec := &recorder{}
+	cc := newContentCache(rec.call, func() {})
+	e := newEditCtl(r.st, r.c.vc, cc, func() {}, r.c.shiftHeld)
+	e.call = rec.call
+	e.refresh = func(done func()) { done() }
+	r.c.edit = e
+	t.Cleanup(func() { reservedBottom.Store(0) })
+	return r, rec
+}
+
+func editCmds(rec *recorder) []string {
+	var out []string
+	for _, c := range rec.calls() {
+		if c["cmd"] != "clips_info" {
+			out = append(out, c["cmd"].(string))
+		}
+	}
+	return out
+}
+
+func TestClipButtonTogglesEditModeAndEncodersChangeJob(t *testing.T) {
+	r, rec := editControls(t)
+	r.st.setCursor(0.5)
+	r.c.onCC(ccClip, 127)
+	if !r.c.editOn() {
+		t.Fatal("Clip did not turn edit mode on")
+	}
+	_, _, _, start, _ := r.st.transport()
+	for i := 0; i < 6; i++ {
+		r.c.onCC(ccEncoder1, 1)
+	}
+	if _, _, _, s2, _ := r.st.transport(); s2 != start {
+		t.Fatal("encoder 1 moved the loop in edit mode")
+	}
+	if !r.c.edit.pendActive() {
+		t.Fatal("encoder 1 did not start a clip move")
+	}
+	r.c.onCC(ccClip, 127) // off: the pending edit is sent
+	waitFor(t, func() bool { return len(editCmds(rec)) == 1 })
+	if editCmds(rec)[0] != "clip_move" {
+		t.Fatalf("%v", editCmds(rec))
+	}
+}
+
+func TestDeleteButtonDeletesOnReleaseUnlessUsedForZoomReset(t *testing.T) {
+	r, rec := editControls(t)
+	r.st.setCursor(0.5)
+	r.c.onCC(ccClip, 127)
+
+	// Delete + Tempo press: zoom reset, no clip deleted
+	r.c.onCC(ccDelete, 127)
+	r.mu.Lock()
+	r.delete = true
+	r.mu.Unlock()
+	r.c.onCC(ccTempoPress, 127)
+	r.c.onCC(ccDelete, 0)
+	r.mu.Lock()
+	r.delete = false
+	r.mu.Unlock()
+	time.Sleep(30 * time.Millisecond)
+	if n := len(editCmds(rec)); n != 0 {
+		t.Fatalf("zoom reset deleted a clip: %v", editCmds(rec))
+	}
+
+	// Delete alone: delete the clip
+	r.c.onCC(ccDelete, 127)
+	r.c.onCC(ccDelete, 0)
+	waitFor(t, func() bool { return len(editCmds(rec)) == 1 })
+	if editCmds(rec)[0] != "clip_delete" {
+		t.Fatalf("%v", editCmds(rec))
+	}
+}
+
+func TestUndoWorksOutsideEditModeShiftRedoes(t *testing.T) {
+	r, rec := editControls(t)
+	r.c.onCC(ccUndo, 127)
+	r.mu.Lock()
+	r.shift = true
+	r.mu.Unlock()
+	r.c.onCC(ccUndo, 127)
+	waitFor(t, func() bool { return len(editCmds(rec)) == 2 })
+	if got := editCmds(rec); got[0] != "undo" || got[1] != "redo" {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestEditButtonsDoNothingOutsideEditMode(t *testing.T) {
+	r, rec := editControls(t)
+	r.st.setCursor(0.5)
+	for _, cc := range []uint8{ccDuplicate, ccMute, ccQuantize, ccNew} {
+		r.c.onCC(cc, 127)
+		r.c.onCC(cc, 0)
+	}
+	r.c.onCC(ccDelete, 127)
+	r.c.onCC(ccDelete, 0)
+	time.Sleep(30 * time.Millisecond)
+	if got := editCmds(rec); len(got) != 0 {
+		t.Fatalf("%v", got)
+	}
+}
